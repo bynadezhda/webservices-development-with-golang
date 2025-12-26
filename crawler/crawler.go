@@ -23,7 +23,7 @@ type Crawler struct {
 	maxGoroutines int
 	sem           chan struct{}
 	mu            sync.Mutex
-	seen          map[string]state
+	state         map[string]state
 }
 
 func NewCrawler(fetcher Fetcher, maxGoroutines int) *Crawler {
@@ -31,7 +31,7 @@ func NewCrawler(fetcher Fetcher, maxGoroutines int) *Crawler {
 		fetcher:       fetcher,
 		maxGoroutines: maxGoroutines,
 		sem:           make(chan struct{}, maxGoroutines),
-		seen:          make(map[string]state),
+		state:         make(map[string]state),
 	}
 }
 
@@ -44,14 +44,14 @@ func (c *Crawler) Crawl(url string, depth int, wg *sync.WaitGroup) {
 
 	c.mu.Lock()
 
-	if s, ok := c.seen[url]; ok {
+	if s, ok := c.state[url]; ok {
 		if s == inFlight || s == done {
 			c.mu.Unlock()
 			return
 		}
 	}
 
-	c.seen[url] = inFlight
+	c.state[url] = inFlight
 	c.mu.Unlock()
 
 	c.sem <- struct{}{}
@@ -60,12 +60,12 @@ func (c *Crawler) Crawl(url string, depth int, wg *sync.WaitGroup) {
 
 	c.mu.Lock()
 	if err != nil {
-		c.seen[url] = failed
+		c.state[url] = failed
 		c.mu.Unlock()
 		log.Println(err)
 		return
 	}
-	c.seen[url] = done
+	c.state[url] = done
 	c.mu.Unlock()
 
 	log.Printf("found: %s %q\n", url, body)
