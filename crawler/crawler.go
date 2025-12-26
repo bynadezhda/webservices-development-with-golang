@@ -71,11 +71,10 @@ func (c *Crawler) Crawl(url string, depth int, wg *sync.WaitGroup) {
 	log.Printf("found: %s %q\n", url, body)
 
 	for _, u := range urls {
-		u := u
 		wg.Add(1)
-		go func(u string) {
+		go func() {
 			c.Crawl(u, depth-1, wg)
-		}(u)
+		}()
 	}
 }
 
