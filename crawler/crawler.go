@@ -1,16 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
+	"time"
 )
 
 var maxGoroutines = 10
 var maxRetries = 5
 
 type Fetcher interface {
-	Fetch(url string) (body string, urls []string, err error)
+	Fetch(ctx context.Context, url string) (body string, urls []string, err error)
 }
 
 type stateType uint8
@@ -45,8 +47,14 @@ func NewCrawler(fetcher Fetcher, maxGoroutines int) *Crawler {
 	}
 }
 
-func (c *Crawler) Crawl(url string, depth int, wg *sync.WaitGroup) {
+func (c *Crawler) Crawl(ctx context.Context, url string, depth int, wg *sync.WaitGroup) {
 	defer wg.Done()
+
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
 
 	if depth <= 0 {
 		return
@@ -75,15 +83,26 @@ func (c *Crawler) Crawl(url string, depth int, wg *sync.WaitGroup) {
 
 	c.mu.Unlock()
 
-	c.sem <- struct{}{}
-	body, urls, err := c.fetcher.Fetch(url)
+	select {
+	case c.sem <- struct{}{}:
+	case <-ctx.Done():
+		c.mu.Lock()
+		c.state[url].status = stateFailed
+		c.mu.Unlock()
+		return
+	}
+
+	body, urls, err := c.fetcher.Fetch(ctx, url)
 	<-c.sem
 
 	c.mu.Lock()
 	if err != nil {
 		c.state[url].status = stateFailed
 		c.mu.Unlock()
-		log.Println(err)
+
+		if ctx.Err() == nil {
+			log.Println(err)
+		}
 		return
 	}
 	c.state[url].status = stateDone
@@ -92,17 +111,26 @@ func (c *Crawler) Crawl(url string, depth int, wg *sync.WaitGroup) {
 	log.Printf("found: %s %q\n", url, body)
 
 	for _, u := range urls {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		wg.Add(1)
-		go c.Crawl(u, depth-1, wg)
+		go c.Crawl(ctx, u, depth-1, wg)
 	}
 }
 
 func main() {
 	crawler := NewCrawler(fetcher, 10)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
-	go crawler.Crawl("https://golang.org/", 4, wg)
+	go crawler.Crawl(ctx, "https://golang.org/", 4, wg)
 	wg.Wait()
 }
 
@@ -113,7 +141,13 @@ type fakeResult struct {
 	urls []string
 }
 
-func (f fakeFetcher) Fetch(url string) (string, []string, error) {
+func (f fakeFetcher) Fetch(ctx context.Context, url string) (string, []string, error) {
+	select {
+	case <-ctx.Done():
+		return "", nil, ctx.Err()
+	default:
+	}
+
 	if res, ok := f[url]; ok {
 		return res.body, res.urls, nil
 	}
