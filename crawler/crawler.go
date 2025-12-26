@@ -6,32 +6,42 @@ import (
 	"sync"
 )
 
+var maxGoroutines = 10
+var maxRetries = 5
+
 type Fetcher interface {
 	Fetch(url string) (body string, urls []string, err error)
 }
 
-type state uint8
+type stateType uint8
 
 const (
-	inFlight state = iota
-	done
-	failed
+	stateInFlight stateType = iota
+	stateDone
+	stateFailed
 )
+
+type urlState struct {
+	status  stateType
+	retries int
+}
 
 type Crawler struct {
 	fetcher       Fetcher
 	maxGoroutines int
+	maxRetries    int
 	sem           chan struct{}
 	mu            sync.Mutex
-	state         map[string]state
+	state         map[string]*urlState
 }
 
 func NewCrawler(fetcher Fetcher, maxGoroutines int) *Crawler {
 	return &Crawler{
 		fetcher:       fetcher,
 		maxGoroutines: maxGoroutines,
+		maxRetries:    maxRetries,
 		sem:           make(chan struct{}, maxGoroutines),
-		state:         make(map[string]state),
+		state:         make(map[string]*urlState),
 	}
 }
 
@@ -45,13 +55,24 @@ func (c *Crawler) Crawl(url string, depth int, wg *sync.WaitGroup) {
 	c.mu.Lock()
 
 	if s, ok := c.state[url]; ok {
-		if s == inFlight || s == done {
+		if s.status == stateInFlight || s.status == stateDone {
+			c.mu.Unlock()
+			return
+		}
+
+		if s.status == stateFailed && s.retries >= c.maxRetries {
 			c.mu.Unlock()
 			return
 		}
 	}
 
-	c.state[url] = inFlight
+	if c.state[url] == nil {
+		c.state[url] = &urlState{status: stateInFlight, retries: 0}
+	} else {
+		c.state[url].status = stateInFlight
+		c.state[url].retries++
+	}
+
 	c.mu.Unlock()
 
 	c.sem <- struct{}{}
@@ -60,21 +81,19 @@ func (c *Crawler) Crawl(url string, depth int, wg *sync.WaitGroup) {
 
 	c.mu.Lock()
 	if err != nil {
-		c.state[url] = failed
+		c.state[url].status = stateFailed
 		c.mu.Unlock()
 		log.Println(err)
 		return
 	}
-	c.state[url] = done
+	c.state[url].status = stateDone
 	c.mu.Unlock()
 
 	log.Printf("found: %s %q\n", url, body)
 
 	for _, u := range urls {
 		wg.Add(1)
-		go func() {
-			c.Crawl(u, depth-1, wg)
-		}()
+		go c.Crawl(u, depth-1, wg)
 	}
 }
 
@@ -87,7 +106,6 @@ func main() {
 	wg.Wait()
 }
 
-// fakeFetcher is Fetcher that returns canned results.
 type fakeFetcher map[string]*fakeResult
 
 type fakeResult struct {
@@ -102,7 +120,6 @@ func (f fakeFetcher) Fetch(url string) (string, []string, error) {
 	return "", nil, fmt.Errorf("not found: %s", url)
 }
 
-// fetcher is a populated fakeFetcher.
 var fetcher = fakeFetcher{
 	"https://golang.org/": &fakeResult{
 		"The Go Programming Language",
