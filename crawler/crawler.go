@@ -2,58 +2,90 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sync"
 )
 
 type Fetcher interface {
-	// Fetch returns the body of URL and
-	// a slice of URLs found on that page.
 	Fetch(url string) (body string, urls []string, err error)
 }
 
-var mu = &sync.Mutex{}
-var cache = map[string]bool{}
+type state uint8
 
-// Crawl uses fetcher to recursively crawl
-// pages starting with url, to a maximum of depth.
-func Crawl(url string, depth int, fetcher Fetcher) {
-	// TODO: Fetch URLs in parallel.
-	// TODO: Don't fetch the same URL twice.
-	// This implementation doesn't do either:
+const (
+	inFlight state = iota
+	done
+	failed
+)
+
+type Crawler struct {
+	fetcher       Fetcher
+	maxGoroutines int
+	sem           chan struct{}
+	mu            sync.Mutex
+	seen          map[string]state
+}
+
+func NewCrawler(fetcher Fetcher, maxGoroutines int) *Crawler {
+	return &Crawler{
+		fetcher:       fetcher,
+		maxGoroutines: maxGoroutines,
+		sem:           make(chan struct{}, maxGoroutines),
+		seen:          make(map[string]state),
+	}
+}
+
+func (c *Crawler) Crawl(url string, depth int, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	if depth <= 0 {
 		return
 	}
 
-	mu.Lock()
-	if cache[url] == true {
-		mu.Unlock()
-		return
+	c.mu.Lock()
+
+	if s, ok := c.seen[url]; ok {
+		if s == inFlight || s == done {
+			c.mu.Unlock()
+			return
+		}
 	}
 
-	cache[url] = true
-	mu.Unlock()
+	c.seen[url] = inFlight
+	c.mu.Unlock()
 
-	body, urls, err := fetcher.Fetch(url)
+	c.sem <- struct{}{}
+	body, urls, err := c.fetcher.Fetch(url)
+	<-c.sem
+
+	c.mu.Lock()
 	if err != nil {
-		fmt.Println(err)
+		c.seen[url] = failed
+		c.mu.Unlock()
+		log.Println(err)
 		return
 	}
-	fmt.Printf("found: %s %q\n", url, body)
-	wg := &sync.WaitGroup{}
+	c.seen[url] = done
+	c.mu.Unlock()
+
+	log.Printf("found: %s %q\n", url, body)
+
 	for _, u := range urls {
-		ur := u
+		u := u
 		wg.Add(1)
-		go func(ur string) {
-			defer wg.Done()
-			Crawl(u, depth-1, fetcher)
-		}(ur)
+		go func(u string) {
+			go c.Crawl(u, depth-1, wg)
+		}(u)
 	}
-	wg.Wait()
-	return
 }
 
 func main() {
-	Crawl("https://golang.org/", 4, fetcher)
+	crawler := NewCrawler(fetcher, 10)
+
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go crawler.Crawl("https://golang.org/", 4, wg)
+	wg.Wait()
 }
 
 // fakeFetcher is Fetcher that returns canned results.
