@@ -74,7 +74,7 @@ func (c *Crawler) Crawl(url string, depth int, wg *sync.WaitGroup) {
 		u := u
 		wg.Add(1)
 		go func(u string) {
-			go c.Crawl(u, depth-1, wg)
+			c.Crawl(u, depth-1, wg)
 		}(u)
 	}
 }
