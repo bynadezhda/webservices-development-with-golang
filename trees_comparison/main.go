@@ -1,46 +1,52 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"golang.org/x/tour/tree"
 )
 
-func Walk(t *tree.Tree, ch chan int) {
+func Walk(ctx context.Context, t *tree.Tree, ch chan<- int) {
 	if t == nil {
 		return
 	}
 
-	Walk(t.Left, ch)
-	ch <- t.Value
-	Walk(t.Right, ch)
+	Walk(ctx, t.Left, ch)
+	select {
+	case <-ctx.Done():
+		return
+	case ch <- t.Value:
+	}
+
+	Walk(ctx, t.Right, ch)
 }
 
 func Same(t1, t2 *tree.Tree) bool {
-	ch1 := startWalk(t1)
-	ch2 := startWalk(t2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch1 := startWalk(ctx, t1)
+	ch2 := startWalk(ctx, t2)
 
 	for {
 		v1, ok1 := <-ch1
 		v2, ok2 := <-ch2
 
-		if ok1 != ok2 {
-			return false
-		}
-		if !ok1 {
+		if !ok1 && !ok2 {
 			return true
 		}
-		if v1 != v2 {
+		if ok1 != ok2 || v1 != v2 {
 			return false
 		}
 	}
 }
 
-func startWalk(t *tree.Tree) <-chan int {
+func startWalk(ctx context.Context, t *tree.Tree) <-chan int {
 	ch := make(chan int)
 	go func() {
-		Walk(t, ch)
-		close(ch)
+		defer close(ch)
+		Walk(ctx, t, ch)
 	}()
 	return ch
 }
