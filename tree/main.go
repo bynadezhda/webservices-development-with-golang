@@ -5,89 +5,76 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"strconv"
+	"path/filepath"
 )
 
 type Element struct {
-	Entry       fs.DirEntry // данный объект
-	FilePath    string      // путь до данного объекта
-	IsLast      bool        // является ли он последним элементом в папке
-	PreviousTab string      // табуляция, которую нужно вывести перед этим объектом, наследуется от предков
+	Entry  fs.DirEntry // данный объект
+	Path   string      // полный путь к текущему объекту (файлу ИЛИ директории)
+	IsLast bool        // является ли он последним элементом в папке
+	Prefix string      // табуляция, которую нужно вывести перед этим объектом, наследуется от предков
 }
 
-func calculatePreviousTab(element Element, isLast bool) string {
+func calculatePrefix(element Element) string {
 	if element.Entry == nil {
 		return ""
 	}
 
-	tab := "│	"
+	tab := "│\t"
 	if element.IsLast {
-		tab = "	"
+		tab = "\t"
 	}
 
-	return element.PreviousTab + tab
+	return element.Prefix + tab
 }
 
 func calculateNearestTab(isLast bool) string {
 	if isLast {
 		return "└───"
-	} else {
-		return "├───"
 	}
+
+	return "├───"
 }
 
-func calculateSizeInfo(element Element) (string, error) {
-	var sizeInfo string = "empty"
-	fileInfo, err := element.Entry.Info()
-
-	if err != nil {
-		return "", err
-	}
-
-	if fileInfo.Size() > 0 {
-		sizeInfo = strconv.FormatInt(fileInfo.Size(), 10) + "b"
-	}
-
-	return sizeInfo, nil
-}
-
-func proccessFile(element Element, out io.Writer, printFiles bool) error {
+func processFile(element Element, out io.Writer, printFiles bool) error {
 	if !printFiles {
 		return nil
 	}
 
-	sizeInfo, err := calculateSizeInfo(element)
-
+	fileInfo, err := element.Entry.Info()
 	if err != nil {
 		return err
 	}
 
-	neariestTab := calculateNearestTab(element.IsLast)
-	fmt.Fprintf(out, "%s%s%s (%s)\n", element.PreviousTab, neariestTab, element.Entry.Name(), sizeInfo)
+	sizeInfo := "empty"
+	if fileInfo.Size() > 0 {
+		sizeInfo = fmt.Sprintf("%db", fileInfo.Size())
+	}
+
+	nearestTab := calculateNearestTab(element.IsLast)
+	fmt.Fprintf(out, "%s%s%s (%s)\n", element.Prefix, nearestTab, element.Entry.Name(), sizeInfo)
 
 	return nil
 }
 
-func iterateFiles(element Element, files []fs.DirEntry, out io.Writer, printFiles bool) {
+func iterateFiles(element Element, files []fs.DirEntry, out io.Writer, printFiles bool) error {
 	for i, file := range files {
-		var newElement Element
-		newElement.Entry = file
-		newElement.FilePath = element.FilePath + file.Name() + "/"
-
-		if i == len(files)-1 {
-			newElement.IsLast = true
-		} else {
-			newElement.IsLast = false
+		child := Element{
+			Entry:  file,
+			Path:   filepath.Join(element.Path, file.Name()),
+			IsLast: i == len(files)-1,
+			Prefix: calculatePrefix(element),
 		}
 
-		newElement.PreviousTab = calculatePreviousTab(element, newElement.IsLast)
-
-		allPrintFile(newElement, out, printFiles)
+		if err := processEntry(child, out, printFiles); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func chooseOnlyDirs(files []fs.DirEntry) []fs.DirEntry {
-	var onlyDirs []fs.DirEntry
+func filterDirs(files []fs.DirEntry) []fs.DirEntry {
+	onlyDirs := make([]fs.DirEntry, 0, len(files))
 
 	for _, file := range files {
 		if file.IsDir() {
@@ -98,67 +85,57 @@ func chooseOnlyDirs(files []fs.DirEntry) []fs.DirEntry {
 	return onlyDirs
 }
 
-func proccessDir(element Element, out io.Writer, printFiles bool) error {
-	neariestTab := calculateNearestTab(element.IsLast)
+func processDir(element Element, out io.Writer, printFiles bool) error {
+	nearestTab := calculateNearestTab(element.IsLast)
 
 	if element.Entry != nil {
-		fmt.Fprintf(out, "%s%s%s\n", element.PreviousTab, neariestTab, element.Entry.Name())
+		fmt.Fprintf(out, "%s%s%s\n", element.Prefix, nearestTab, element.Entry.Name())
 	}
 
-	var readDirPath string
-
-	if element.FilePath == "" {
-		readDirPath = "."
-	} else {
-		readDirPath = element.FilePath
+	readPath := element.Path
+	if readPath == "" {
+		readPath = "."
 	}
-
-	files, err := os.ReadDir(readDirPath)
+	files, err := os.ReadDir(readPath)
 
 	if err != nil {
 		return err
 	}
 
 	if !printFiles {
-		files = chooseOnlyDirs(files)
+		files = filterDirs(files)
 	}
 
-	iterateFiles(element, files, out, printFiles)
-
-	return nil
+	return iterateFiles(element, files, out, printFiles)
 }
 
-func allPrintFile(element Element, out io.Writer, printFiles bool) error {
+func processEntry(element Element, out io.Writer, printFiles bool) error {
 	if element.Entry == nil || element.Entry.IsDir() {
-		if err := proccessDir(element, out, printFiles); err != nil {
-			return err
-		}
-	} else {
-		if err := proccessFile(element, out, printFiles); err != nil {
-			return err
-		}
+		return processDir(element, out, printFiles)
 	}
-	return nil
+	return processFile(element, out, printFiles)
 }
 
 func dirTree(out io.Writer, path string, printFiles bool) error {
-	var nullElement = Element{nil, path + "/", true, ""}
-	if err := allPrintFile(nullElement, out, printFiles); err != nil {
-		return err
+	root := Element{
+		Entry:  nil,
+		Path:   path,
+		IsLast: true,
 	}
 
-	return nil
+	return processEntry(root, out, printFiles)
 }
 
 func main() {
-	out := os.Stdout
-	if !(len(os.Args) == 2 || len(os.Args) == 3) {
-		panic("usage go run main.go . [-f]")
+	if len(os.Args) < 2 || len(os.Args) > 3 {
+		fmt.Fprintln(os.Stderr, "usage: go run main.go <path> [-f]")
+		os.Exit(1)
 	}
 	path := os.Args[1]
 	printFiles := len(os.Args) == 3 && os.Args[2] == "-f"
-	err := dirTree(out, path, printFiles)
-	if err != nil {
-		panic(err.Error())
+
+	if err := dirTree(os.Stdout, path, printFiles); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 }
